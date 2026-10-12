@@ -25,3 +25,10 @@ terraform.rc
 
 # Plan files
 *.tfplan
+
+
+# Lambda build output
+**/build/
+
+# Editor settings
+.vscode/
