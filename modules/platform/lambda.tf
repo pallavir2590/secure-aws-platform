@@ -6,6 +6,9 @@ data "archive_file" "lambda" {
   type        = "zip"
   source_dir  = "${path.module}/lambda_src"
   output_path = "${path.module}/build/${local.name}-health.zip"
+
+  # Same file permissions on Windows and Linux, so the zip hash matches everywhere
+  output_file_mode = "0644"
 }
 
 # Encrypted log group with retention, created before the function
@@ -87,9 +90,10 @@ resource "aws_lambda_function" "health" {
   filename         = data.archive_file.lambda.output_path
   source_code_hash = data.archive_file.lambda.output_base64sha256
 
-  #Reserved concurrency is not set: new AWS accounts allow only 10 concurrent
+  # Reserved concurrency is not set: new AWS accounts allow only 10 concurrent
   # executions in total, and AWS requires all 10 to stay unreserved.
   # Once the account limit is raised, add: reserved_concurrent_executions = 5
+
   kms_key_arn = aws_kms_key.main.arn
 
   environment {

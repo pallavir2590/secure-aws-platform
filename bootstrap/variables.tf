@@ -9,3 +9,14 @@ variable "project" {
   type        = string
   default     = "secure-aws-platform"
 }
+variable "github_owner" {
+  description = ""
+  type        = string
+  default     = "pallavir2590"
+}
+
+variable "github_repo" {
+  description = "The GitHub repository name"
+  type        = string
+  default     = "secure-aws-platform"
+}
