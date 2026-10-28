@@ -20,3 +20,16 @@ variable "github_repo" {
   type        = string
   default     = "secure-aws-platform"
 }
+
+
+variable "github_owner_id" {
+  description = "Numeric ID of the GitHub owner (shown in the OIDC sub claim)"
+  type        = string
+  default     = "72736122"
+}
+
+variable "github_repo_id" {
+  description = "Numeric ID of the GitHub repository (shown in the OIDC sub claim)"
+  type        = string
+  default     = "1412474964"
+}

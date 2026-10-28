@@ -5,7 +5,21 @@
 # ---------------------------------------------------------------
 
 locals {
-  repo_path = "${var.github_owner}/${var.github_repo}"
+  # GitHub now sends an immutable "sub" claim that includes the numeric
+  # owner and repository IDs, e.g. repo:owner@123/repo@456:pull_request.
+  # We trust both that format and the classic repo:owner/repo format.
+  subject_prefixes = [
+    "repo:${var.github_owner}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}",
+    "repo:${var.github_owner}/${var.github_repo}",
+  ]
+
+  plan_subjects = flatten([
+    for p in local.subject_prefixes : ["${p}:pull_request", "${p}:ref:refs/heads/main"]
+  ])
+
+  apply_subjects = flatten([
+    for p in local.subject_prefixes : ["${p}:environment:dev", "${p}:environment:prod"]
+  ])
 }
 
 # Tell AWS to trust tokens issued by GitHub Actions
@@ -43,10 +57,7 @@ data "aws_iam_policy_document" "plan_trust" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values = [
-        "repo:${local.repo_path}:pull_request",
-        "repo:${local.repo_path}:ref:refs/heads/main"
-      ]
+      values   = local.plan_subjects
     }
   }
 }
@@ -134,10 +145,8 @@ data "aws_iam_policy_document" "apply_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values = [
-        "repo:${local.repo_path}:environment:dev",
-        "repo:${local.repo_path}:environment:prod"
-      ]
+      values   = local.apply_subjects
+
     }
   }
 }
@@ -153,3 +162,5 @@ resource "aws_iam_role_policy_attachment" "apply_admin" {
   role       = aws_iam_role.github_apply.name
   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
 }
+
+
