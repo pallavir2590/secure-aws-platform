@@ -174,4 +174,6 @@ jobs:
         run: |
           aws lambda invoke --function-name secure-aws-platform-dev-health response.json
           cat response.json
-          grep -q '"healthy"' response.json
+          STATUS=$(jq -r '.body | fromjson | .status' response.json)
+          echo "Health status: $STATUS"
+          test "$STATUS" = "healthy"
