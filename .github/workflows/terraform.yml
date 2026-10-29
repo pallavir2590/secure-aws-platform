@@ -1,12 +1,13 @@
 # ---------------------------------------------------------------
-# Terraform CI/CD for the dev environment
+# Terraform CI/CD for dev and prod
 #
-#   Pull request  ->  security scan  ->  fmt / validate / plan  ->  plan posted as a PR comment
-#   Merge to main ->  security scan  ->  plan  ->  apply to dev
+#   Pull request  ->  security scan  ->  plan dev + plan prod  ->  plans posted as PR comments
+#   Merge to main ->  security scan  ->  plan  ->  apply dev  ->  smoke test
+#                 ->  WAIT FOR APPROVAL  ->  apply prod  ->  smoke test
 #
 # AWS access uses GitHub OIDC (no stored keys):
-#   plan jobs  -> read-only role   (secret AWS_PLAN_ROLE_ARN)
-#   apply job  -> deploy role      (secret AWS_APPLY_ROLE_ARN), only via the "dev" environment
+#   plan jobs   -> read-only role
+#   apply jobs  -> deploy role, only via the protected "dev" / "prod" environments
 # ---------------------------------------------------------------
 name: Terraform
 
@@ -37,7 +38,6 @@ concurrency:
 env:
   AWS_REGION: us-east-1
   TF_IN_AUTOMATION: "true"
-  WORKDIR: envs/dev
   PLAN_ROLE_ARN: arn:aws:iam::211125360310:role/github-actions-terraform-plan
   APPLY_ROLE_ARN: arn:aws:iam::211125360310:role/github-actions-terraform-apply
 
@@ -61,18 +61,22 @@ jobs:
       - name: Run Checkov
         run: checkov --directory . --framework terraform --compact --quiet
 
-  # 2) Format, validate and plan using the READ-ONLY role
+  # 2) Format, validate and plan BOTH environments with the READ-ONLY role
   plan:
-    name: Plan (dev)
+    name: Plan (${{ matrix.environment }})
     runs-on: ubuntu-latest
     needs: security-scan
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [dev, prod]
     permissions:
       contents: read
       id-token: write        # lets the job request a GitHub OIDC token
       pull-requests: write   # lets the job comment the plan on the PR
     defaults:
       run:
-        working-directory: ${{ env.WORKDIR }}
+        working-directory: envs/${{ matrix.environment }}
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -81,12 +85,11 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
-    
 
       - name: Log in to AWS (read-only role via OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{env.PLAN_ROLE_ARN}}
+          role-to-assume: ${{ env.PLAN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Check formatting
@@ -99,7 +102,6 @@ jobs:
         run: terraform validate -no-color
 
       - name: Plan
-        id: plan
         run: |
           set -o pipefail
           terraform plan -input=false -no-color -lock-timeout=5m | tee plan.txt
@@ -107,17 +109,19 @@ jobs:
       - name: Post plan to pull request
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
+        env:
+          ENV_NAME: ${{ matrix.environment }}
         with:
           script: |
             const fs = require('fs');
-            let plan = fs.readFileSync('${{ env.WORKDIR }}/plan.txt', 'utf8');
+            const envName = process.env.ENV_NAME;
+            let plan = fs.readFileSync(`envs/${envName}/plan.txt`, 'utf8');
             const max = 60000;
             if (plan.length > max) {
-              plan = plan.substring(plan.length - max);
-              plan = '... (truncated, see the workflow log for the full plan)\n' + plan;
+              plan = '... (truncated, see the workflow log for the full plan)\n' + plan.substring(plan.length - max);
             }
             const body = [
-              '### Terraform plan: `dev`',
+              `### Terraform plan: \`${envName}\``,
               '',
               '<details><summary>Show plan</summary>',
               '',
@@ -136,19 +140,19 @@ jobs:
               body
             });
 
-  # 3) Apply to dev using the DEPLOY role - only after merge to main
+  # 3) Apply to DEV automatically after merge to main
   apply-dev:
     name: Apply (dev)
     runs-on: ubuntu-latest
     needs: plan
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    environment: dev          # must match the OIDC trust in bootstrap/github-oidc.tf
+    environment: dev
     permissions:
       contents: read
       id-token: write
     defaults:
       run:
-        working-directory: ${{ env.WORKDIR }}
+        working-directory: envs/dev
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -161,7 +165,7 @@ jobs:
       - name: Log in to AWS (deploy role via OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{env.APPLY_ROLE_ARN}}
+          role-to-assume: ${{ env.APPLY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Init
@@ -173,6 +177,49 @@ jobs:
       - name: Smoke test - invoke the health check Lambda
         run: |
           aws lambda invoke --function-name secure-aws-platform-dev-health response.json
+          cat response.json
+          STATUS=$(jq -r '.body | fromjson | .status' response.json)
+          echo "Health status: $STATUS"
+          test "$STATUS" = "healthy"
+
+  # 4) Apply to PROD only after dev succeeds AND a reviewer approves
+  #    (approval is configured on the GitHub "prod" environment)
+  apply-prod:
+    name: Apply (prod)
+    runs-on: ubuntu-latest
+    needs: apply-dev
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    environment: prod
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: envs/prod
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Log in to AWS (deploy role via OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Init
+        run: terraform init -input=false
+
+      - name: Apply
+        run: terraform apply -input=false -auto-approve -no-color -lock-timeout=5m
+
+      - name: Smoke test - invoke the health check Lambda
+        run: |
+          aws lambda invoke --function-name secure-aws-platform-prod-health response.json
           cat response.json
           STATUS=$(jq -r '.body | fromjson | .status' response.json)
           echo "Health status: $STATUS"
